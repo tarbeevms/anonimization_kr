@@ -4,6 +4,7 @@ import json
 import random
 import hashlib
 import sys
+import warnings
 from pathlib import Path
 import numpy as np
 import torch
@@ -16,6 +17,11 @@ from transformers import AutoTokenizer, AutoModelForTokenClassification, pipelin
 from seqeval.metrics import f1_score
 from bert_score import score as bert_score
 import csv
+from collections import defaultdict
+
+# Suppress noisy third-party warnings in CLI output.
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API.")
+warnings.filterwarnings("ignore", message=r"Baseline not Found for bert-base-multilingual-cased.*")
 
 # pymorphy2 calls the removed inspect.getargspec on Python 3.11+.
 # Provide a drop-in replacement returning the 4-tuple ArgSpec the library expects.
@@ -701,6 +707,12 @@ with open(SOURCE_TEXTS_FILE, "r", encoding="utf-8") as f:
 
 synonymized_texts = []
 masked_variants = []
+pd_spans_original = []
+pd_spans_synonym = []
+pd_spans_masked = []
+pd_spans_by_label_orig = defaultdict(list)
+pd_spans_by_label_syn = defaultdict(list)
+pd_spans_by_label_mask = defaultdict(list)
 
 def mask_text(text):
     text = re.sub(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", "[REDACTED]", text)
@@ -713,15 +725,84 @@ def mask_text(text):
 
 def run_pipeline():
     for text in original_texts:
-        anon_text, _ = anonymize_text(text, ner_predictor_func=ner_predictor)
+        anon_text, details = anonymize_text(text, ner_predictor_func=ner_predictor)
         synonymized_texts.append(anon_text)
         masked_variants.append(mask_text(text))
+        # собираем спаны ПДн для точечной оценки BERTScore
+        for rep in details.get("replacements", []):
+            s = rep.get("start")
+            e = rep.get("end")
+            lbl = rep.get("label")
+            if s is None or e is None:
+                continue
+            original_fragment = text[s:e]
+            replacement_fragment = rep.get("replacement", original_fragment)
+            if not original_fragment.strip():
+                continue
+            pd_spans_original.append(original_fragment)
+            pd_spans_synonym.append(replacement_fragment if replacement_fragment.strip() else "[REDACTED]")
+            pd_spans_masked.append("[REDACTED]")
+            if lbl:
+                pd_spans_by_label_orig[lbl].append(original_fragment)
+                pd_spans_by_label_syn[lbl].append(replacement_fragment if replacement_fragment.strip() else "[REDACTED]")
+                pd_spans_by_label_mask[lbl].append("[REDACTED]")
 
-    P_syn, R_syn, F1_syn = bert_score(original_texts, synonymized_texts, lang="ru", rescale_with_baseline=True)
-    P_mask, R_mask, F1_mask = bert_score(original_texts, masked_variants, lang="ru", rescale_with_baseline=True)
+    P_syn, R_syn, F1_syn = bert_score(
+        original_texts,
+        synonymized_texts,
+        lang="ru",
+        rescale_with_baseline=False,  # отключаем поиск baseline, чтобы убрать предупреждения
+    )
+    P_mask, R_mask, F1_mask = bert_score(
+        original_texts,
+        masked_variants,
+        lang="ru",
+        rescale_with_baseline=False,
+    )
 
     print(f"Синонимическая замена BERTScore F1: {F1_syn.mean().item():.4f}")
     print(f"Маскирование BERTScore F1: {F1_mask.mean().item():.4f}")
+
+    # BERTScore только по спанам ПДн, чтобы видеть влияние замен
+    if pd_spans_original:
+        _, _, F1_syn_spans = bert_score(
+            pd_spans_original,
+            pd_spans_synonym,
+            lang="ru",
+            rescale_with_baseline=False,
+        )
+        _, _, F1_mask_spans = bert_score(
+            pd_spans_original,
+            pd_spans_masked,
+            lang="ru",
+            rescale_with_baseline=False,
+        )
+        print(f"Спаны ПДн (синонимы) BERTScore F1: {F1_syn_spans.mean().item():.4f}")
+        print(f"Спаны ПДн (маскирование) BERTScore F1: {F1_mask_spans.mean().item():.4f}")
+        # per-label spans
+        print("BERTScore по спанам ПДн по меткам:")
+        header = f"{'Label':<12} {'F1_syn':>8} {'F1_mask':>8}"
+        print(header)
+        all_labels = sorted(set(pd_spans_by_label_orig.keys()) | set(pd_spans_by_label_syn.keys()))
+        for lbl in all_labels:
+            orig_lst = pd_spans_by_label_orig.get(lbl, [])
+            syn_lst = pd_spans_by_label_syn.get(lbl, [])
+            mask_lst = pd_spans_by_label_mask.get(lbl, [])
+            if not orig_lst or not syn_lst or not mask_lst:
+                continue
+            _, _, f1_syn_lbl = bert_score(
+                orig_lst,
+                syn_lst,
+                lang="ru",
+                rescale_with_baseline=False,
+            )
+            _, _, f1_mask_lbl = bert_score(
+                orig_lst,
+                mask_lst,
+                lang="ru",
+                rescale_with_baseline=False,
+            )
+            print(f"{lbl:<12} {f1_syn_lbl.mean().item():>8.4f} {f1_mask_lbl.mean().item():>8.4f}")
 
     if F1_syn.mean() > F1_mask.mean():
         print("Синонимическая замена лучше сохраняет смысл текста.")
