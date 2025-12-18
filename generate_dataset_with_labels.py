@@ -8,6 +8,23 @@ from faker import Faker
 random.seed(42)
 fake = Faker("ru_RU")
 
+NOISE_PROB_SENTENCE = 0.35
+NOISE_PROB_CHAR = 0.08
+NOISE_PROB_SWAP = 0.05
+NOISE_CHAR_MAP = {
+    "е": ["ё", "e"],
+    "ё": ["е"],
+    "а": ["о", "а"],
+    "о": ["а", "о"],
+    "и": ["й"],
+    "й": ["и"],
+    "c": ["с"],
+    "с": ["c"],
+    ",": ["."],
+    ".": [","],
+    "-": ["—", "-"],
+}
+
 
 # --- генераторы отдельных полей ---
 
@@ -259,6 +276,43 @@ def gen_sentence_and_labels(kind: str) -> Tuple[str, Dict[str, int], List[Dict[s
     return text, labels, spans
 
 
+def apply_noise(text: str, spans: List[Dict[str, str]]) -> str:
+    """
+    Вносит небольшие шумы в текст без изменения длины и позиций спанов:
+    - замены символов на близкие
+    - случайные смены регистра
+    - редкие перестановки соседних символов вне спанов
+    """
+    if random.random() > NOISE_PROB_SENTENCE or not text:
+        return text
+
+    protected = [False] * len(text)
+    for span in spans:
+        for pos in range(span["start"], min(span["end"], len(text))):
+            protected[pos] = True
+
+    chars = list(text)
+
+    for idx, ch in enumerate(chars):
+        if protected[idx]:
+            continue
+        if random.random() < NOISE_PROB_CHAR:
+            candidates = NOISE_CHAR_MAP.get(ch, [])
+            if candidates:
+                chars[idx] = random.choice(candidates)
+                continue
+            if ch.isalpha() and ch.swapcase() != ch:
+                chars[idx] = ch.swapcase()
+
+    if random.random() < NOISE_PROB_SWAP and len(chars) > 1:
+        candidates = [i for i in range(len(chars) - 1) if not protected[i] and not protected[i + 1]]
+        if candidates:
+            i = random.choice(candidates)
+            chars[i], chars[i + 1] = chars[i + 1], chars[i]
+
+    return "".join(chars)
+
+
 def generate_samples(kind: str, min_sentences: int, target_per_attr: int):
     samples: List[Tuple[str, Dict[str, int]]] = []
     spans_all: List[List[Dict[str, str]]] = []
@@ -276,6 +330,7 @@ def generate_samples(kind: str, min_sentences: int, target_per_attr: int):
 
     while not enough():
         text, labels, spans = gen_sentence_and_labels(kind)
+        text = apply_noise(text, spans)
         samples.append((text, labels))
         spans_all.append(spans)
         for attr, val in labels.items():

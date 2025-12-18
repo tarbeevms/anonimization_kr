@@ -11,6 +11,7 @@ import torch
 import inspect
 import collections
 import pymorphy2
+import urllib.parse
 from typing import List, Tuple, Dict, Any, Iterable
 from faker import Faker
 from transformers import AutoTokenizer, AutoModelForTokenClassification, pipeline
@@ -35,8 +36,8 @@ if not hasattr(inspect, "getargspec"):
     inspect.getargspec = _getargspec
 
 
-# Модель NER для извлечения сущностей
-MODEL_NAME_NER = "0x7o/rubert-base-massive-ner"
+# Модель NER для извлечения сущностей (семантика FAMILY/NAME без PERSON)
+MODEL_NAME_NER = "models/rubert-ner"
 MAPPING_FILE = "anonymization_map.json"
 SEED = 42
 DEVICE = 0 if torch.cuda.is_available() else -1
@@ -83,6 +84,19 @@ CADASTRAL_REGEX = re.compile(r"\b\d{2}:\d{2}:\d{6,}:?\d*\b")
 INN10_WEIGHTS = (2, 4, 10, 3, 5, 9, 4, 6, 8)
 INN12_WEIGHTS_N2 = (7, 2, 4, 10, 3, 5, 9, 4, 6, 8)
 INN12_WEIGHTS_N1 = (3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8)
+
+TOKEN_REGEX = re.compile(r"\S+")
+CASE_TAGS = {"nomn", "gent", "datv", "accs", "ablt", "loct", "voct"}
+STRUCT_PRIORITIES = {
+    "PASSPORT": 1,
+    "INN": 2,
+    "SNILS": 3,
+    "CARD": 4,
+    "MARRIAGE": 5,
+    "CADASTRAL": 6,
+    "PHONE": 7,
+    "URL": 8,
+}
 
 
 def _clean_str(value):
@@ -210,6 +224,71 @@ def generate_passport_preserve_series(passport_str: str) -> str:
     return f"{series[:2]} {series[2:]} {number}"
 
 
+def anonymize_url_preserve_structure(url: str) -> str:
+    """
+    Сохраняет схему и TLD, обезличивая сам домен и буквенно-цифровые символы
+    в пути/параметрах на детерминированный рандом той же длины.
+    """
+    has_scheme = url.startswith(("http://", "https://"))
+    parsed = urllib.parse.urlsplit(url if has_scheme else "http://" + url)
+    rng = random.Random(_stable_hash(url))
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    hostname = parsed.hostname or ""
+    port = parsed.port
+    if "." in hostname:
+        idx = hostname.rfind(".")
+        host_name = hostname[:idx]
+        host_tld = hostname[idx:]
+    else:
+        host_name = hostname
+        host_tld = ""
+
+    anon_host_name = "".join(rng.choice(alphabet) if ch.isalnum() else ch for ch in host_name)
+    host_anon = anon_host_name + host_tld
+    if port:
+        host_anon += f":{port}"
+
+    def _mask_part(part: str) -> str:
+        return "".join(rng.choice(alphabet) if ch.isalnum() else ch for ch in part)
+
+    anon_path = _mask_part(parsed.path)
+    anon_query = _mask_part(parsed.query)
+    anon_fragment = _mask_part(parsed.fragment)
+
+    return urllib.parse.urlunsplit((parsed.scheme or "http", host_anon, anon_path, anon_query, anon_fragment))
+
+
+def _validate_inn(value: str) -> bool:
+    digits = [int(ch) for ch in re.sub(r"\D", "", value)]
+    if len(digits) == 10:
+        return _calc_check_digit(digits[:9], INN10_WEIGHTS) == digits[9]
+    if len(digits) == 12:
+        n2 = _calc_check_digit(digits[:10], INN12_WEIGHTS_N2)
+        n1 = _calc_check_digit(digits[:11], INN12_WEIGHTS_N1)
+        return digits[10] == n2 and digits[11] == n1
+    return False
+
+
+def _validate_snils(value: str) -> bool:
+    digits = [int(ch) for ch in re.sub(r"\D", "", value)]
+    if len(digits) != 11:
+        return False
+    base, ctrl = digits[:9], digits[9:]
+    return snils_check_sum(base) == (ctrl[0] * 10 + ctrl[1])
+
+
+def _validate_card(value: str) -> bool:
+    digits = [int(ch) for ch in re.sub(r"\D", "", value)]
+    if len(digits) < 13 or len(digits) > 19:
+        return False
+    return luhn_checksum_from_digits(digits) == 0
+
+
+def _validate_passport(value: str) -> bool:
+    digits = re.sub(r"\D", "", value)
+    return len(digits) == 10
+
+
 RUSSIAN_MALE_NAMES = [
     "Андрей", "Иван", "Сергей", "Дмитрий", "Алексей", "Максим", "Егор", "Матвей", "Михаил", "Даниил",
     "Пётр", "Фёдор", "Степан", "Георгий", "Григорий", "Антон", "Кирилл", "Руслан", "Олег", "Юрий",
@@ -284,17 +363,22 @@ def morph_inflect_name(original: str, new_base: str) -> str:
     return " ".join(res_words)
 
 
-def anonymize_name(original: str, kind: str = "NAME") -> str:
-    key = f"{kind}::{original}"
+def anonymize_name(original: str, kind: str = "NAME", gender_hint: str = None) -> str:
+    gender_key = gender_hint if gender_hint in ("femn", "masc") else "unk"
+    key = f"{kind}::{original}::{gender_key}"
+    legacy_key = f"{kind}::{original}"
     if key in MAPPING:
         return MAPPING[key]
+    if legacy_key in MAPPING:
+        return MAPPING[legacy_key]
 
     parsed = morph.parse(original)[0]
-    gender = None
-    if "femn" in parsed.tag:
-        gender = "femn"
-    elif "masc" in parsed.tag:
-        gender = "masc"
+    gender = gender_hint if gender_hint in ("femn", "masc") else None
+    if gender is None:
+        if "femn" in parsed.tag:
+            gender = "femn"
+        elif "masc" in parsed.tag:
+            gender = "masc"
 
     if kind == "NAME":
         if gender:
@@ -327,6 +411,49 @@ def anonymize_name(original: str, kind: str = "NAME") -> str:
     return anon
 
 
+def _case_tags_from_parse(p):
+    return {g for g in CASE_TAGS if g in p.tag}
+
+
+def detect_context_gender(text: str, target_span: Tuple[int, int], target_cases: set = None) -> str:
+    """
+    Ищет ближайшие к target_span токены (±2) и возвращает род (masc/femn),
+    если токен помечен в морфоразборе. Сначала пробуем совпадение по падежу.
+    """
+    tokens = list(TOKEN_REGEX.finditer(text))
+    token_idx = None
+    for i, m in enumerate(tokens):
+        if not (target_span[1] <= m.start() or target_span[0] >= m.end()):
+            token_idx = i
+            break
+    if token_idx is None:
+        return None
+
+    same_case_candidates = []
+    any_gender_candidates = []
+
+    for offset in (-1, 1, -2, 2):
+        idx = token_idx + offset
+        if idx < 0 or idx >= len(tokens):
+            continue
+        word = tokens[idx].group(0)
+        parsed = morph.parse(word)[0]
+        gender = "femn" if "femn" in parsed.tag else "masc" if "masc" in parsed.tag else None
+        if not gender:
+            continue
+        cases = _case_tags_from_parse(parsed)
+        if target_cases and cases and target_cases & cases:
+            same_case_candidates.append(gender)
+        else:
+            any_gender_candidates.append(gender)
+
+    if same_case_candidates:
+        return same_case_candidates[0]
+    if any_gender_candidates:
+        return any_gender_candidates[0]
+    return None
+
+
 def extract_structured_pd(text: str) -> Dict[str, List[Tuple[int, int, Any]]]:
     out = {
         "urls": [], "phones": [], "inns": [], "passports": [],
@@ -351,30 +478,73 @@ def extract_structured_pd(text: str) -> Dict[str, List[Tuple[int, int, Any]]]:
     return out
 
 
-tokenizer_ner = AutoTokenizer.from_pretrained(MODEL_NAME_NER)
+tokenizer_ner = AutoTokenizer.from_pretrained(MODEL_NAME_NER, use_fast=True)
 model_ner = AutoModelForTokenClassification.from_pretrained(MODEL_NAME_NER)
 nlp_ner = pipeline("ner", model=model_ner, tokenizer=tokenizer_ner,
                    aggregation_strategy="simple", device=DEVICE)
 
 
 def ner_predictor(text: str):
-    ents = nlp_ner(text)
     spans = []
-    for ent in ents:
-        lab = ent.get("entity_group", ent.get("entity", "PER"))
-        if lab in ("PER", "PERSON", "Name", "Person"):
-            spans.append({
+
+    raw = []
+    for ent in nlp_ner(text):
+        lab = ent.get("entity_group", ent.get("entity"))
+        if lab not in ("FAMILY", "NAME"):
+            continue
+        s, e = ent["start"], ent["end"]
+        if s is None or e is None:
+            continue
+        frag = ent.get("word", text[s:e])
+        # пропускаем заведомо не-именные куски (типа '/')
+        if not re.search(r"[A-Za-zА-Яа-яЁё]", frag):
+            continue
+        raw.append({"start": s, "end": e, "entity": lab})
+
+    raw = sorted(raw, key=lambda x: x["start"])
+    merged: List[Dict[str, Any]] = []
+    for ent in raw:
+        if merged and merged[-1]["entity"] == ent["entity"] and ent["start"] <= merged[-1]["end"]:
+            merged[-1]["end"] = max(merged[-1]["end"], ent["end"])
+            merged[-1]["text"] = text[merged[-1]["start"]:merged[-1]["end"]]
+        elif merged and merged[-1]["entity"] == ent["entity"] and ent["start"] == merged[-1]["end"]:
+            merged[-1]["end"] = ent["end"]
+            merged[-1]["text"] = text[merged[-1]["start"]:merged[-1]["end"]]
+        else:
+            merged.append({
                 "start": ent["start"],
                 "end": ent["end"],
-                "text": ent["word"],
-                "entity": "PERSON",
+                "entity": ent["entity"],
+                "text": text[ent["start"]:ent["end"]],
             })
+
+    def expand_to_word_boundaries(s: int, e: int) -> Tuple[int, int]:
+        while s > 0 and re.match(r"[A-Za-zА-Яа-яЁё'-]", text[s - 1]):
+            s -= 1
+        while e < len(text) and re.match(r"[A-Za-zА-Яа-яЁё'-]", text[e]):
+            e += 1
+        return s, e
+
+    expanded = []
+    for ent in merged:
+        s, e = expand_to_word_boundaries(ent["start"], ent["end"])
+        expanded.append({
+            "start": s,
+            "end": e,
+            "entity": ent["entity"],
+            "text": text[s:e],
+        })
+
+    spans.extend(expanded)
     return spans
 
 
 def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, List[Dict]]]:
     details = {"replacements": []}
     working = text
+
+    if ner_predictor_func is None:
+        ner_predictor_func = ner_predictor
 
     def match_case(orig: str, repl: str) -> str:
         if orig.istitle():
@@ -385,58 +555,40 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
             return repl.lower()
         return repl
 
-    # Сейчас в анонимизации используем только эвристику с ФИО ниже.
-    # ner_predictor_func оставлен на будущее расширение.
-    detected = []
+    person_spans = []
+    if ner_predictor_func:
+        for ent in ner_predictor_func(working):
+            label = ent.get("entity")
+            if label not in ("FAMILY", "NAME"):
+                continue
+            s, e = ent.get("start"), ent.get("end")
+            if s is None or e is None:
+                continue
+            orig_text = ent.get("text", working[s:e])
+            cases = _case_tags_from_parse(morph.parse(orig_text)[0])
+            gender_hint = detect_context_gender(working, (s, e), cases)
+            kind = "SURNAME" if label == "FAMILY" else "NAME"
+            anon_token = match_case(orig_text, anonymize_name(orig_text, kind=kind, gender_hint=gender_hint))
+            person_spans.append({
+                "start": s,
+                "end": e,
+                "label": label,
+                "text": orig_text,
+                "replacement": anon_token,
+            })
 
-    fio_pattern = re.compile(r"\b([А-ЯЁ][а-яё]+)\s+([А-ЯЁ][а-яё]+)(?:\s+([А-ЯЁ][а-яё]+))?\b")
-    titles = {"Гражданин", "Гражданка", "гражданин", "гражданка"}
-    for match in fio_pattern.finditer(working):
-        overlap = False
-        for ds in detected:
-            if not (match.end() <= ds[0] or match.start() >= ds[1]):
-                overlap = True
-                break
-        if overlap:
-            continue
-        # собираем слова с их позициями
-        parts = [
-            (match.group(1), match.start(1), match.end(1)),
-            (match.group(2), match.start(2), match.end(2)),
-        ]
-        if match.group(3):
-            parts.append((match.group(3), match.start(3), match.end(3)))
-        parts = [p for p in parts if p[0] not in titles]
-        if len(parts) < 2:
-            continue
-        # берем последние два слова как фамилию и имя
-        fam_word, fam_s, fam_e = parts[-2]
-        name_word, name_s, name_e = parts[-1]
-        if re.search(r"(ов|ев|ёв|ова|ева|ёва|ин|ина|ын|ына|кий|ая|ый|ко)$", fam_word.lower()):
-            surname_orig, name_orig = fam_word, name_word
-            span_s, span_e = fam_s, name_e
-        elif re.search(r"(ов|ев|ёв|ова|ева|ёва|ин|ина|ын|ына|кий|ая|ый|ко)$", name_word.lower()):
-            surname_orig, name_orig = name_word, fam_word
-            span_s, span_e = name_s, fam_e
-        else:
-            surname_orig, name_orig = fam_word, name_word
-            span_s, span_e = fam_s, name_e
+    # применяем замены от конца к началу, чтобы не разъезжались индексы
+    for p in sorted(person_spans, key=lambda x: x["start"], reverse=True):
+        s, e = p["start"], p["end"]
+        working = working[:s] + p["replacement"] + working[e:]
 
-        anon_surname = match_case(surname_orig, anonymize_name(surname_orig, kind="SURNAME"))
-        anon_name = match_case(name_orig, anonymize_name(name_orig, kind="NAME"))
-        replacement = anon_surname + " " + anon_name
-        detected.append((span_s, span_e, replacement))
-
-    # одиночные фамилии по тексту не добавляем, чтобы не ловить одиночные упоминания
-
-    detected_sorted = sorted(detected, key=lambda x: x[0], reverse=True)
-    for s, e, payload in detected_sorted:
-        working = working[:s] + payload + working[e:]
+    for p in sorted(person_spans, key=lambda x: x["start"]):
         details["replacements"].append({
-            "start": s,
-            "end": e,
-            "label": "PERSON",
-            "replacement": payload
+            "start": p["start"],
+            "end": p["end"],
+            "label": p["label"],
+            "text": p["text"],
+            "replacement": p["replacement"],
         })
 
     struct = extract_structured_pd(working)
@@ -447,32 +599,9 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
         if key in MAPPING:
             anon = MAPPING[key]
         else:
-            m = re.match(r"(?P<scheme>https?://)(?P<host>[^/]+)(?P<path>/?.*)", val, re.IGNORECASE)
-            if not m:
-                anon = "http://anonymized.example/"
-            else:
-                scheme = m.group("scheme")
-                host = m.group("host")
-                path = m.group("path")
-                tld_match = re.search(r"\.([a-zA-Z]{2,})$", host)
-                tld = tld_match.group(1) if tld_match else "ru"
-                anon_domain = _choose_from_list_stable(host, ["redacted", "anonymized", "hidden"]) + "." + tld
-                if path in ("", "/"):
-                    anon_path = "/"
-                else:
-                    segments = [seg for seg in path.split("/") if seg]
-                    rng = random.Random(_stable_hash(val))
-                    anon_segments = [
-                        "".join(
-                            rng.choice("abcdefghijklmnopqrstuvwxyz0123456789")
-                            for _ in range(max(3, min(12, len(seg))))
-                        )
-                        for seg in segments
-                    ]
-                    anon_path = "/" + "/".join(anon_segments)
-                anon = scheme + anon_domain + anon_path
+            anon = anonymize_url_preserve_structure(val)
             MAPPING[key] = anon
-        replacements.append((s, e, anon, "URL"))
+        replacements.append({"start": s, "end": e, "anon": anon, "label": "URL", "text": val})
 
     for s, e, val in struct["phones"]:
         key = f"PHONE::{val}"
@@ -480,7 +609,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
         if MAPPING.get(key) != anon_value:
             MAPPING[key] = anon_value
         anon = MAPPING[key]
-        replacements.append((s, e, anon, "PHONE"))
+        replacements.append({"start": s, "end": e, "anon": anon, "label": "PHONE", "text": val})
 
     for s, e, val in struct["inns"]:
         key = f"INN::{val}"
@@ -488,7 +617,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
         if MAPPING.get(key) != anon_value:
             MAPPING[key] = anon_value
         anon = MAPPING[key]
-        replacements.append((s, e, anon, "INN"))
+        replacements.append({"start": s, "end": e, "anon": anon, "label": "INN", "text": val})
 
     inn_spans = {(s, e) for s, e, _ in struct["inns"]}
 
@@ -502,7 +631,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
         else:
             anon = generate_passport_preserve_series(g)
             MAPPING[key] = anon
-        replacements.append((s, e, anon, "PASSPORT"))
+        replacements.append({"start": s, "end": e, "anon": anon, "label": "PASSPORT", "text": g})
 
     for s, e, val in struct["cards"]:
         digits = re.sub(r"\D", "", val)
@@ -513,7 +642,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
             anon = generate_card_preserve_bin(val)
             anon = " ".join([anon[i:i + 4] for i in range(0, len(anon), 4)])
             MAPPING[key] = anon
-        replacements.append((s, e, anon, "CARD"))
+        replacements.append({"start": s, "end": e, "anon": anon, "label": "CARD", "text": val})
 
     for s, e, val in struct["snils"]:
         digits = re.sub(r"\D", "", val)
@@ -524,7 +653,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
             anon = generate_snils_preserve_prefix(val)
             anon = f"{anon[:3]}-{anon[3:6]}-{anon[6:9]} {anon[9:]}"
             MAPPING[key] = anon
-        replacements.append((s, e, anon, "SNILS"))
+        replacements.append({"start": s, "end": e, "anon": anon, "label": "SNILS", "text": val})
 
     for s, e, val in struct["marriage"]:
         key = f"MARRIAGE::{val}"
@@ -536,7 +665,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
             number = rng.randint(0, 999999)
             anon = f"{series:02d}-{number:06d}"
             MAPPING[key] = anon
-        replacements.append((s, e, anon, "MARRIAGE"))
+        replacements.append({"start": s, "end": e, "anon": anon, "label": "MARRIAGE", "text": val})
 
     for s, e, val in struct["cadastral"]:
         key = f"CADASTRAL::{val}"
@@ -553,16 +682,44 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
             else:
                 anon = "00:00:000000:0000"
             MAPPING[key] = anon
-        replacements.append((s, e, anon, "CADASTRAL"))
+        replacements.append({"start": s, "end": e, "anon": anon, "label": "CADASTRAL", "text": val})
 
-    replacements_sorted = sorted(replacements, key=lambda x: x[0], reverse=True)
-    for s, e, r, label in replacements_sorted:
+    def _is_valid_span(span: Dict[str, Any]) -> bool:
+        lbl = span.get("label")
+        txt = span.get("text", "")
+        if lbl == "INN":
+            return _validate_inn(txt)
+        if lbl == "SNILS":
+            return _validate_snils(txt)
+        if lbl == "CARD":
+            return _validate_card(txt)
+        if lbl == "PASSPORT":
+            return _validate_passport(txt)
+        return True
+
+    replacements = [r for r in replacements if _is_valid_span(r)]
+    replacements.sort(key=lambda r: (STRUCT_PRIORITIES.get(r["label"], 99), r["start"], -(r["end"] - r["start"])))
+
+    accepted = []
+    occupied: List[Tuple[int, int]] = []
+    for rep in replacements:
+        s, e = rep["start"], rep["end"]
+        overlap = any(not (e <= os or s >= oe) for os, oe in occupied)
+        if overlap:
+            continue
+        occupied.append((s, e))
+        accepted.append(rep)
+
+    accepted_sorted = sorted(accepted, key=lambda x: x["start"], reverse=True)
+    for rep in accepted_sorted:
+        s, e = rep["start"], rep["end"]
+        r = rep["anon"]
         original_slice = working[s:e]
         working = working[:s] + r + working[e:]
         details["replacements"].append({
             "start": s,
             "end": e,
-            "label": label,
+            "label": rep["label"],
             "text": original_slice,
             "replacement": r
         })
@@ -598,13 +755,12 @@ def details_to_flags(details: Dict[str, List[Dict[str, Any]]]) -> Dict[str, int]
     for rep in details.get("replacements", []):
         label = rep.get("label")
 
-        # ФИО (эвристика на две заглавные) идут как PERSON.
-        # Предполагаем, что если есть PERSON, то в предложении есть и фамилия, и имя.
-        if label == "PERSON":
+        if label == "FAMILY":
             flags["has_family"] = 1
+        if label == "NAME":
             flags["has_name"] = 1
 
-        elif label == "PASSPORT":
+        if label == "PASSPORT":
             flags["has_passport"] = 1
 
         elif label == "INN":

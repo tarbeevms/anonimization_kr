@@ -13,7 +13,8 @@ import kr  # reuse regexes and ner_predictor
 
 
 LABEL_MAP = {
-    "PERSON": "NAME",  # nlp_ner returns PERSON, мы считаем это именем/фамилией
+    "FAMILY": "FAMILY",
+    "NAME": "NAME",
     "PASSPORT": "PASSPORT",
     "INN": "INN",
     "SNILS": "SNILS",
@@ -40,7 +41,7 @@ def load_fine_tuned():
         return _fine_tuned_model, _fine_tuned_tokenizer
     if not os.path.isdir(MODEL_DIR):
         return None, None
-    _fine_tuned_tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+    _fine_tuned_tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, use_fast=True)
     _fine_tuned_model = AutoModelForTokenClassification.from_pretrained(MODEL_DIR)
     return _fine_tuned_model, _fine_tuned_tokenizer
 
@@ -94,7 +95,7 @@ def predict_spans(text, use_struct=True, use_fallback=True):
     if use_fallback and model is None:
         ents = kr.ner_predictor(text)
         for ent in ents:
-            spans.append((ent["start"], ent["end"], "NAME"))
+            spans.append((ent["start"], ent["end"], ent.get("entity", "NAME")))
     return spans
 
 
