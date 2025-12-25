@@ -66,6 +66,7 @@ def _stable_hash(s: str) -> int:
 
 
 def _choose_from_list_stable(s: str, lst: List[str]) -> str:
+    """Детерминированно выбирает элемент из списка на основе стабильного хеша строки s."""
     if not lst:
         return s
     return lst[_stable_hash(s) % len(lst)]
@@ -100,6 +101,7 @@ STRUCT_PRIORITIES = {
 
 
 def _clean_str(value):
+    """Обрезает пробелы и возвращает None, если на входе не строка или пустая строка."""
     if not isinstance(value, str):
         return None
     stripped = value.strip()
@@ -107,10 +109,12 @@ def _clean_str(value):
 
 
 def _calc_check_digit(digits: Iterable[int], weights: Iterable[int]) -> int:
+    """Универсальный расчёт контрольной цифры: сумма произведений по модулю 11, затем мод 10."""
     return (sum(d * w for d, w in zip(digits, weights)) % 11) % 10
 
 
 def anonymize_phone_preserve_format(phone: str) -> str:
+    """Сохраняет формат телефона, но детерминированно заменяет все цифры кроме первых четырёх."""
     text = _clean_str(phone)
     if text is None:
         return phone
@@ -132,6 +136,7 @@ def anonymize_phone_preserve_format(phone: str) -> str:
 
 
 def anonymize_inn_preserve_structure(value: str) -> str:
+    """Сохраняет первые 4 цифры ИНН, детерминированно генерирует остальные и контрольные цифры."""
     text = _clean_str(value)
     if text is None:
         return value
@@ -163,6 +168,7 @@ def anonymize_inn_preserve_structure(value: str) -> str:
 
 
 def luhn_checksum_from_digits(digits: List[int]) -> int:
+    """Возвращает чек-сумму Луна для списка цифр (0 означает корректный номер)."""
     digits_rev = digits[::-1]
     s = 0
     for i, d in enumerate(digits_rev):
@@ -177,11 +183,13 @@ def luhn_checksum_from_digits(digits: List[int]) -> int:
 
 
 def luhn_generate_check(digits: List[int]) -> int:
+    """Генерирует контрольную цифру Луна для номера без последней цифры."""
     checksum = luhn_checksum_from_digits(digits + [0])
     return (10 - checksum) % 10
 
 
 def generate_card_preserve_bin(card: str) -> str:
+    """Сохраняет BIN (первые 6 цифр), генерирует остальные и контрольную цифру по Луну."""
     digits = re.sub(r"\D", "", card)
     if len(digits) < 6:
         digits = digits.ljust(6, "0")
@@ -196,6 +204,7 @@ def generate_card_preserve_bin(card: str) -> str:
 
 
 def snils_check_sum(digits: List[int]) -> int:
+    """Считает контрольное число СНИЛС по правилу 9..1; возвращает 0 при спец. значениях."""
     s = sum(digits[i] * (9 - i) for i in range(9))
     if s < 100:
         return s
@@ -206,6 +215,7 @@ def snils_check_sum(digits: List[int]) -> int:
 
 
 def generate_snils_preserve_prefix(snils_str: str) -> str:
+    """Сохраняет первые 3 цифры, генерирует остальные и валидное контрольное число."""
     digits = re.sub(r"\D", "", snils_str)
     digits = digits.ljust(9, "0")
     prefix = digits[:3]
@@ -217,6 +227,7 @@ def generate_snils_preserve_prefix(snils_str: str) -> str:
 
 
 def generate_passport_preserve_series(passport_str: str) -> str:
+    """Сохраняет серию паспорта (первые 4 цифры), генерирует номер."""
     digits = re.sub(r"\D", "", passport_str)
     series = digits[:4].ljust(4, "0")
     rng = random.Random(_stable_hash(series))
@@ -259,6 +270,7 @@ def anonymize_url_preserve_structure(url: str) -> str:
 
 
 def _validate_inn(value: str) -> bool:
+    """Проверяет корректность ИНН (10/12 знаков) по контрольным цифрам."""
     digits = [int(ch) for ch in re.sub(r"\D", "", value)]
     if len(digits) == 10:
         return _calc_check_digit(digits[:9], INN10_WEIGHTS) == digits[9]
@@ -270,6 +282,7 @@ def _validate_inn(value: str) -> bool:
 
 
 def _validate_snils(value: str) -> bool:
+    """Валидирует СНИЛС по длине и контрольной сумме."""
     digits = [int(ch) for ch in re.sub(r"\D", "", value)]
     if len(digits) != 11:
         return False
@@ -278,6 +291,7 @@ def _validate_snils(value: str) -> bool:
 
 
 def _validate_card(value: str) -> bool:
+    """Проверяет номер карты по длине и алгоритму Луна."""
     digits = [int(ch) for ch in re.sub(r"\D", "", value)]
     if len(digits) < 13 or len(digits) > 19:
         return False
@@ -285,6 +299,7 @@ def _validate_card(value: str) -> bool:
 
 
 def _validate_passport(value: str) -> bool:
+    """Простая проверка паспорта: 10 цифр без учёта серии/региона."""
     digits = re.sub(r"\D", "", value)
     return len(digits) == 10
 
@@ -306,6 +321,7 @@ LAST_NAMES = [fake.last_name() for _ in range(500)]
 
 
 def _extract_grammemes(p):
+    """Извлекает из морфоразбора набор падежей/числа/рода для согласования."""
     gset = set()
     for g in ("nomn", "gent", "datv", "accs", "ablt", "loct", "voct", "sing", "plur", "masc", "femn", "neut"):
         if g in p.tag:
@@ -314,15 +330,18 @@ def _extract_grammemes(p):
 
 
 def morph_inflect_name(original: str, new_base: str) -> str:
+    """Подгоняет новую основу ФИО под граммемы оригинала (падеж/число/род), по словам."""
     orig_words = original.split()
     new_words = new_base.split()
     res_words = []
     for i, ow in enumerate(orig_words):
+        # берем соответствующее новое слово (если слов меньше, используем последнее)
         nw = new_words[i] if i < len(new_words) else new_words[-1]
         p_orig = morph.parse(ow)[0]
         p_new = morph.parse(nw)[0]
         grammemes = _extract_grammemes(p_orig)
         if grammemes:
+            # сразу пытаемся просклонять новое слово под полный набор граммем оригинала
             inflected = p_new.inflect(grammemes)
             if inflected:
                 res_words.append(inflected.word)
@@ -333,6 +352,7 @@ def morph_inflect_name(original: str, new_base: str) -> str:
             if gender in p_orig.tag:
                 gm = set(g for g in grammemes if g not in ("masc", "femn", "neut"))
                 gm.add(gender)
+                # если род однозначен в оригинале — пробуем подставить его в набор граммем
                 inf = p_new.inflect(gm)
                 if inf:
                     res_words.append(inf.word)
@@ -343,12 +363,14 @@ def morph_inflect_name(original: str, new_base: str) -> str:
 
         gm = set(g for g in grammemes if g not in ("masc", "femn", "neut"))
         if gm:
+            # если род не удалось применить — сохраняем хотя бы падеж/число
             inf = p_new.inflect(gm)
             if inf:
                 res_words.append(inf.word)
                 continue
 
         if "femn" in p_orig.tag:
+            # форсируем чистый род, когда больше ничего не сработало
             forced = p_new.inflect({"femn"})
             if forced:
                 res_words.append(forced.word)
@@ -364,6 +386,7 @@ def morph_inflect_name(original: str, new_base: str) -> str:
 
 
 def anonymize_name(original: str, kind: str = "NAME", gender_hint: str = None) -> str:
+    """Подбирает детерминированную замену имени/фамилии с учётом рода и падежа."""
     gender_key = gender_hint if gender_hint in ("femn", "masc") else "unk"
     key = f"{kind}::{original}::{gender_key}"
     legacy_key = f"{kind}::{original}"
@@ -373,6 +396,7 @@ def anonymize_name(original: str, kind: str = "NAME", gender_hint: str = None) -
         return MAPPING[legacy_key]
 
     parsed = morph.parse(original)[0]
+    # определяем род: сначала из подсказки, затем из морфоразбора исходного слова
     gender = gender_hint if gender_hint in ("femn", "masc") else None
     if gender is None:
         if "femn" in parsed.tag:
@@ -380,6 +404,7 @@ def anonymize_name(original: str, kind: str = "NAME", gender_hint: str = None) -
         elif "masc" in parsed.tag:
             gender = "masc"
 
+    # выбираем кандидатов для замены по фильтру рода (если известен)
     if kind == "NAME":
         if gender:
             candidates = [n for n in FIRST_NAMES if gender in morph.parse(n)[0].tag]
@@ -398,6 +423,7 @@ def anonymize_name(original: str, kind: str = "NAME", gender_hint: str = None) -
 
     base = _choose_from_list_stable(original, candidates)
 
+    # собираем граммемы (падеж/число) исходного слова для последующей инфлексии замены
     grammemes = set()
     for g in ["sing", "plur", "nomn", "gent", "datv", "accs", "ablt", "loct", "voct"]:
         if g in parsed.tag:
@@ -412,6 +438,7 @@ def anonymize_name(original: str, kind: str = "NAME", gender_hint: str = None) -
 
 
 def _case_tags_from_parse(p):
+    """Достаёт набор падежей из морфоразбора (для поиска контекстного рода)."""
     return {g for g in CASE_TAGS if g in p.tag}
 
 
@@ -422,6 +449,7 @@ def detect_context_gender(text: str, target_span: Tuple[int, int], target_cases:
     """
     tokens = list(TOKEN_REGEX.finditer(text))
     token_idx = None
+    # находим токен, который пересекается с целевым span
     for i, m in enumerate(tokens):
         if not (target_span[1] <= m.start() or target_span[0] >= m.end()):
             token_idx = i
@@ -432,6 +460,7 @@ def detect_context_gender(text: str, target_span: Tuple[int, int], target_cases:
     same_case_candidates = []
     any_gender_candidates = []
 
+    # просматриваем соседние токены (±1, ±2) и ищем в них род
     for offset in (-1, 1, -2, 2):
         idx = token_idx + offset
         if idx < 0 or idx >= len(tokens):
@@ -443,6 +472,7 @@ def detect_context_gender(text: str, target_span: Tuple[int, int], target_cases:
             continue
         cases = _case_tags_from_parse(parsed)
         if target_cases and cases and target_cases & cases:
+            # если падеж совпадает с целевым — приоритет
             same_case_candidates.append(gender)
         else:
             any_gender_candidates.append(gender)
@@ -455,6 +485,7 @@ def detect_context_gender(text: str, target_span: Tuple[int, int], target_cases:
 
 
 def extract_structured_pd(text: str) -> Dict[str, List[Tuple[int, int, Any]]]:
+    """Ищет в тексте структурированные ПДн регекспами и возвращает позиции/значения по типам."""
     out = {
         "urls": [], "phones": [], "inns": [], "passports": [],
         "cards": [], "snils": [], "marriage": [], "cadastral": [],
@@ -485,9 +516,11 @@ nlp_ner = pipeline("ner", model=model_ner, tokenizer=tokenizer_ner,
 
 
 def ner_predictor(text: str):
+    """Прогоняет NER-модель, мерджит пересекающиеся спаны и расширяет до границ слов."""
     spans = []
 
     raw = []
+    # шаг 1: получаем сырые предсказания pipeline и отбираем только FAMILY/NAME
     for ent in nlp_ner(text):
         lab = ent.get("entity_group", ent.get("entity"))
         if lab not in ("FAMILY", "NAME"):
@@ -501,6 +534,7 @@ def ner_predictor(text: str):
             continue
         raw.append({"start": s, "end": e, "entity": lab})
 
+    # шаг 2: мерджим пересекающиеся/смежные спаны одного типа
     raw = sorted(raw, key=lambda x: x["start"])
     merged: List[Dict[str, Any]] = []
     for ent in raw:
@@ -519,6 +553,7 @@ def ner_predictor(text: str):
             })
 
     def expand_to_word_boundaries(s: int, e: int) -> Tuple[int, int]:
+        # расширяем спан до границ слова (буквы/дефис/апостроф)
         while s > 0 and re.match(r"[A-Za-zА-Яа-яЁё'-]", text[s - 1]):
             s -= 1
         while e < len(text) and re.match(r"[A-Za-zА-Яа-яЁё'-]", text[e]):
@@ -540,9 +575,11 @@ def ner_predictor(text: str):
 
 
 def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, List[Dict]]]:
+    """Главный пайплайн: ищет ФИО и структурированные ПДн, генерирует замены и возвращает детали."""
     details = {"replacements": []}
     working = text
 
+    # по умолчанию используем встроенный NER для ФИО
     if ner_predictor_func is None:
         ner_predictor_func = ner_predictor
 
@@ -557,6 +594,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
 
     person_spans = []
     if ner_predictor_func:
+        # собираем спаны ФИО, подбираем замену с учётом падежа/рода и регистра
         for ent in ner_predictor_func(working):
             label = ent.get("entity")
             if label not in ("FAMILY", "NAME"):
@@ -582,6 +620,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
         s, e = p["start"], p["end"]
         working = working[:s] + p["replacement"] + working[e:]
 
+    # логируем замены ФИО
     for p in sorted(person_spans, key=lambda x: x["start"]):
         details["replacements"].append({
             "start": p["start"],
@@ -591,6 +630,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
             "replacement": p["replacement"],
         })
 
+    # ищем структурированные ПДн регулярками
     struct = extract_structured_pd(working)
     replacements = []
 
@@ -697,6 +737,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
             return _validate_passport(txt)
         return True
 
+    # фильтруем невалидные совпадения и разбираем конфликтные пересечения по приоритетам
     replacements = [r for r in replacements if _is_valid_span(r)]
     replacements.sort(key=lambda r: (STRUCT_PRIORITIES.get(r["label"], 99), r["start"], -(r["end"] - r["start"])))
 
@@ -710,6 +751,7 @@ def anonymize_text(text: str, ner_predictor_func=None) -> Tuple[str, Dict[str, L
         occupied.append((s, e))
         accepted.append(rep)
 
+    # применяем замены структурированных сущностей в тексте (с конца)
     accepted_sorted = sorted(accepted, key=lambda x: x["start"], reverse=True)
     for rep in accepted_sorted:
         s, e = rep["start"], rep["end"]
@@ -786,67 +828,36 @@ def details_to_flags(details: Dict[str, List[Dict[str, Any]]]) -> Dict[str, int]
 
     return flags
 
-
-# demo_sample = """
-# Макаровой Дарье дали email kaput@example.com, телефон +7 (917) 253-17-22,
-# ИНН 7707654654, паспорт 45 23 333222, банковскую карту 4217 4122 5432 1234, СНИЛС 168-321-123 44.
-# зайдите http://greenbank.ru/ для деталей.
-# """
-
-# anon, details = anonymize_text(demo_sample, ner_predictor_func=ner_predictor)
-# print("Original:\n", demo_sample)
-# print("\nAnonymized:\n", anon)
-# print("\nDetails:\n", json.dumps(details, ensure_ascii=False, indent=2))
-
-# P, R, F1 = bert_score([anon], [demo_sample], lang='ru', rescale_with_baseline=True)
-# print(f"\nBERTScore Precision: {P.mean().item():.4f}")
-# print(f"BERTScore Recall: {R.mean().item():.4f}")
-# print(f"BERTScore F1: {F1.mean().item():.4f}")
-
-# input_dir = "texts"
-# output_dir = "texts_anon"
-# os.makedirs(output_dir, exist_ok=True)
-
-# for filename in os.listdir(input_dir):
-#     if filename.endswith(".txt"):
-#         filepath = os.path.join(input_dir, filename)
-#         with open(filepath, "r", encoding="utf-8") as f:
-#             text = f.read()
-#         anon_text, _ = anonymize_text(text)
-#         outpath = os.path.join(output_dir, filename)
-#         with open(outpath, "w", encoding="utf-8") as f:
-#             f.write(anon_text)
-
 # --- Генерация CSV с предсказаниями по датасету из 200 предложений ---
 
-def build_pred_labels(dataset_path: str = "dataset_200.txt",
-                      output_path: str = "pred_labels_200.csv") -> None:
-    """
-    Читает по строкам dataset_200.txt и для каждого предложения
-    запускает anonymize_text, после чего строит строку CSV:
-    id; text; has_family; has_name; ...; has_cadastral
-    """
-    with open(dataset_path, "r", encoding="utf-8") as f_in, \
-         open(output_path, "w", encoding="utf-8", newline="") as f_out:
+# def build_pred_labels(dataset_path: str = "dataset_200.txt",
+#                       output_path: str = "pred_labels_200.csv") -> None:
+#     """
+#     Читает по строкам dataset_200.txt и для каждого предложения
+#     запускает anonymize_text, после чего строит строку CSV:
+#     id; text; has_family; has_name; ...; has_cadastral
+#     """
+#     with open(dataset_path, "r", encoding="utf-8") as f_in, \
+#          open(output_path, "w", encoding="utf-8", newline="") as f_out:
 
-        writer = csv.writer(f_out, delimiter=";")
-        # заголовок
-        writer.writerow(["id", "text"] + ATTRS)
+#         writer = csv.writer(f_out, delimiter=";")
+#         # заголовок
+#         writer.writerow(["id", "text"] + ATTRS)
 
-        for idx, line in enumerate(f_in):
-            text = line.rstrip("\n")
-            if not text:
-                continue
+#         for idx, line in enumerate(f_in):
+#             text = line.rstrip("\n")
+#             if not text:
+#                 continue
 
-            # используем существующий распознаватель:
-            # anonymize_text возвращает details["replacements"] с label-ами
-            _, details = anonymize_text(text, ner_predictor_func=ner_predictor)
+#             # используем существующий распознаватель:
+#             # anonymize_text возвращает details["replacements"] с label-ами
+#             _, details = anonymize_text(text, ner_predictor_func=ner_predictor)
 
-            flags = details_to_flags(details)
-            row = [idx, text] + [flags[a] for a in ATTRS]
-            writer.writerow(row)
+#             flags = details_to_flags(details)
+#             row = [idx, text] + [flags[a] for a in ATTRS]
+#             writer.writerow(row)
 
-    print(f"pred_labels_200.csv записан в файл {output_path}")
+#     print(f"pred_labels_200.csv записан в файл {output_path}")
 
 
 import os
@@ -871,15 +882,81 @@ pd_spans_by_label_syn = defaultdict(list)
 pd_spans_by_label_mask = defaultdict(list)
 
 def mask_text(text):
-    text = re.sub(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", "[REDACTED]", text)
-    text = re.sub(r"\+7[\s\d\-\(\)]{10,}", "[REDACTED]", text)
-    text = re.sub(r"https?://\S+", "[REDACTED]", text)
-    text = re.sub(r"\b\d{10,16}\b", "[REDACTED]", text)  # карты, ИНН
-    text = re.sub(r"\b\d{2}\s\d{2}\s\d{6}\b", "[REDACTED]", text)  # паспорт
-    text = re.sub(r"\b\d{3}-\d{3}-\d{3} \d{2}\b", "[REDACTED]", text)  # СНИЛС
-    return text
+    """
+    Маскирует все распознанные ПДн (ФИО + структурированные regex-спаны) на [REDACTED].
+    Использует те же детекторы, что и anonymize_text, чтобы охват совпадал.
+    """
+    working = text
+    replacements = []
 
-def run_pipeline():
+    # ФИО из NER
+    for ent in ner_predictor(working):
+        lab = ent.get("entity")
+        if lab not in ("FAMILY", "NAME"):
+            continue
+        s, e = ent.get("start"), ent.get("end")
+        if s is None or e is None:
+            continue
+        replacements.append({"start": s, "end": e, "label": lab, "text": working[s:e], "anon": "[REDACTED]"})
+
+    # Структурированные ПДн по тем же регекспам
+    struct = extract_structured_pd(working)
+    for s, e, val in struct["urls"]:
+        replacements.append({"start": s, "end": e, "label": "URL", "text": val, "anon": "[REDACTED]"})
+    for s, e, val in struct["phones"]:
+        replacements.append({"start": s, "end": e, "label": "PHONE", "text": val, "anon": "[REDACTED]"})
+    for s, e, val in struct["inns"]:
+        replacements.append({"start": s, "end": e, "label": "INN", "text": val, "anon": "[REDACTED]"})
+    inn_spans = {(s, e) for s, e, _ in struct["inns"]}
+    for s, e, val in struct["passports"]:
+        if (s, e) in inn_spans:
+            continue
+        replacements.append({"start": s, "end": e, "label": "PASSPORT", "text": val, "anon": "[REDACTED]"})
+    for s, e, val in struct["cards"]:
+        replacements.append({"start": s, "end": e, "label": "CARD", "text": val, "anon": "[REDACTED]"})
+    for s, e, val in struct["snils"]:
+        replacements.append({"start": s, "end": e, "label": "SNILS", "text": val, "anon": "[REDACTED]"})
+    for s, e, val in struct["marriage"]:
+        replacements.append({"start": s, "end": e, "label": "MARRIAGE", "text": val, "anon": "[REDACTED]"})
+    for s, e, val in struct["cadastral"]:
+        replacements.append({"start": s, "end": e, "label": "CADASTRAL", "text": val, "anon": "[REDACTED]"})
+
+    # Валидация числовых структур
+    def _is_valid_span(span: Dict[str, Any]) -> bool:
+        lbl = span.get("label")
+        txt = span.get("text", "")
+        if lbl == "INN":
+            return _validate_inn(txt)
+        if lbl == "SNILS":
+            return _validate_snils(txt)
+        if lbl == "CARD":
+            return _validate_card(txt)
+        if lbl == "PASSPORT":
+            return _validate_passport(txt)
+        return True
+
+    replacements = [r for r in replacements if _is_valid_span(r)]
+
+    # Разруливаем пересечения по приоритетам
+    replacements.sort(key=lambda r: (STRUCT_PRIORITIES.get(r["label"], 99), r["start"], -(r["end"] - r["start"])))
+    accepted = []
+    occupied: List[Tuple[int, int]] = []
+    for rep in replacements:
+        s, e = rep["start"], rep["end"]
+        overlap = any(not (e <= os or s >= oe) for os, oe in occupied)
+        if overlap:
+            continue
+        occupied.append((s, e))
+        accepted.append(rep)
+
+    # Применяем маски с конца, чтобы не сдвигать индексы
+    for rep in sorted(accepted, key=lambda x: x["start"], reverse=True):
+        s, e = rep["start"], rep["end"]
+        working = working[:s] + "[REDACTED]" + working[e:]
+
+    return working
+    
+if __name__ == "__main__":
     for text in original_texts:
         anon_text, details = anonymize_text(text, ner_predictor_func=ner_predictor)
         synonymized_texts.append(anon_text)
@@ -964,23 +1041,3 @@ def run_pipeline():
         print("Синонимическая замена лучше сохраняет смысл текста.")
     else:
         print("Маскирование лучше сохраняет смысл текста или примерно одинаково.")
-
-
-if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        # если передан файл, печатаем спаны и обезличенный текст
-        input_text = Path(sys.argv[1]).read_text(encoding="utf-8")
-        anon, details = anonymize_text(input_text, ner_predictor_func=ner_predictor)
-        print("__ИСХОДНЫЙ ТЕКСТ__")
-        print(input_text)
-        print("__СПАНЫ ПДН__")
-        for rep in details.get("replacements", []):
-            lbl = rep.get("label")
-            s = rep.get("start")
-            e = rep.get("end")
-            orig = rep.get("text", input_text[s:e])
-            print(f"{lbl} -> '{orig.strip()}' [{s}:{e}]")
-        print("__ОБЕЗЛИЧЕННЫЙ__")
-        print(anon)
-    else:
-        run_pipeline()

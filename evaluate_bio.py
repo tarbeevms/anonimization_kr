@@ -36,6 +36,7 @@ _fine_tuned_tokenizer = None
 
 
 def load_fine_tuned():
+    """Ленивая загрузка дообученной NER-модели и токенизатора из models/rubert-ner."""
     global _fine_tuned_model, _fine_tuned_tokenizer
     if _fine_tuned_model is not None:
         return _fine_tuned_model, _fine_tuned_tokenizer
@@ -47,10 +48,12 @@ def load_fine_tuned():
 
 
 def predict_spans(text, use_struct=True, use_fallback=True):
+    """Возвращает список спанов (start, end, label), объединяя модельные и структурные regex-сущности."""
     spans = []
 
     model, tok = load_fine_tuned()
     if model and tok:
+        # токенизируем по словам, прогоняем модель, мапим wordpiece-метки обратно к словам
         token_spans = tokenize_with_spans(text)
         words = [m.group(0) for m in token_spans]
         encoding = tok(
@@ -100,6 +103,7 @@ def predict_spans(text, use_struct=True, use_fallback=True):
 
 
 def build_pred_bio(texts, use_struct=True, use_fallback=True):
+    """Строит BIO-последовательности для списка текстов по предсказанным спанам."""
     sentences = []
     for text in texts:
         char_labels = ["O"] * len(text)
@@ -131,6 +135,7 @@ def build_pred_bio(texts, use_struct=True, use_fallback=True):
 
 
 def read_gold_bio(path="gold_bio.tsv"):
+    """Читает эталонный BIO-файл и возвращает список предложений с метками токенов."""
     sentences = []
     current = []
     with open(path, encoding="utf-8") as f:
@@ -151,6 +156,7 @@ def read_gold_bio(path="gold_bio.tsv"):
 
 
 def compute_f1(gold_labels, pred_labels):
+    """Считает токен-level Precision/Recall/F1 по BIO-массивам."""
     assert len(gold_labels) == len(pred_labels)
     labels = set(l for l in gold_labels + pred_labels if l != "O")
     metrics = {}
@@ -173,6 +179,7 @@ def compute_f1(gold_labels, pred_labels):
 
 
 def main():
+    """CLI: собирает предсказания, сравнивает с gold, печатает токеновые и seqeval метрики."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--ner-only",
